@@ -3,7 +3,9 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from pathlib import Path
+import datetime as dt
 
 # ==================================================
 # 1. PAGE CONFIGURATION
@@ -267,6 +269,61 @@ def load_data(file_path):
     return data
 
 
+@st.cache_data
+def compute_findings(data):
+    """Key findings computed on the FULL dataset (not the date filter),
+    so they match the README and do not change with the slider."""
+    by_product = (
+        data.groupby("Product_Code")["Order_Demand"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+    total = by_product.sum()
+    cum_share = by_product.cumsum() / total
+
+    # Number of products needed to reach 80% of total demand
+    n80 = int((cum_share < 0.80).sum()) + 1
+    top10_share = by_product.head(10).sum() / total
+
+    by_cat = (
+        data.groupby("Product_Category")["Order_Demand"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+    by_wh = (
+        data.groupby("Warehouse")["Order_Demand"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+
+    # Biggest month-over-month jump in number of records (data coverage)
+    monthly_records = data.set_index("Date")["Order_Demand"].resample("MS").size()
+    prev = monthly_records.shift(1)
+    ratio = (monthly_records / prev).where(prev > 0)
+
+    jump = None
+    if ratio.notna().any():
+        jump_month = ratio.idxmax()
+        jump = {
+            "month": jump_month,
+            "prev_month": jump_month - pd.offsets.MonthBegin(1),
+            "prev_records": int(prev.loc[jump_month]),
+            "records": int(monthly_records.loc[jump_month]),
+        }
+
+    return {
+        "n_products": len(by_product),
+        "n80": n80,
+        "pct80": n80 / len(by_product),
+        "top10_share": top10_share,
+        "top_cat": by_cat.index[0],
+        "top_cat_share": by_cat.iloc[0] / total,
+        "top_wh": by_wh.index[0],
+        "top_wh_share": by_wh.iloc[0] / total,
+        "jump": jump,
+    }
+
+
 try:
     df = load_data(DATA_PATH)
 except FileNotFoundError:
@@ -375,11 +432,21 @@ st.sidebar.caption("Adjust the date range to explore the data.")
 min_date = df["Date"].min().date()
 max_date = df["Date"].max().date()
 
+# Default to 2012-2016 (earlier data is sparse, Jan 2017 is partial),
+# clamped to the dates that actually exist in the dataset.
+default_start = min(max(dt.date(2012, 1, 1), min_date), max_date)
+default_end = max(min(dt.date(2016, 12, 31), max_date), min_date)
+
 date_range = st.sidebar.date_input(
     "Date range",
-    value=(min_date, max_date),
+    value=(default_start, default_end),
     min_value=min_date,
     max_value=max_date
+)
+
+st.sidebar.caption(
+    "Defaults to 2012-2016. Data before late 2011 is sparse and "
+    "January 2017 is a partial month."
 )
 
 if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
@@ -452,6 +519,45 @@ with k4:
 st.divider()
 
 # ==================================================
+# 8B. KEY FINDINGS (FULL DATASET)
+# ==================================================
+
+st.subheader("Key Findings")
+st.caption(
+    "Calculated on the full dataset, so these figures do not change "
+    "with the date filter."
+)
+
+findings = compute_findings(df)
+
+f1, f2, f3, f4 = st.columns(4, gap="medium")
+
+with f1:
+    st.metric(
+        "Products driving 80% of demand",
+        f"{findings['n80']:,}",
+        delta=f"{findings['pct80']:.1%} of {findings['n_products']:,} products",
+        delta_color="off"
+    )
+
+with f2:
+    st.metric("Top 10 products' share", f"{findings['top10_share']:.1%}")
+
+with f3:
+    st.metric(
+        f"Top category ({findings['top_cat']})",
+        f"{findings['top_cat_share']:.1%}"
+    )
+
+with f4:
+    st.metric(
+        f"Top warehouse ({findings['top_wh']})",
+        f"{findings['top_wh_share']:.1%}"
+    )
+
+st.divider()
+
+# ==================================================
 # 9. MONTHLY DEMAND TREND
 # ==================================================
 
@@ -497,6 +603,78 @@ st.plotly_chart(
     use_container_width=True,
     config=PLOT_CONFIG
 )
+
+st.divider()
+
+# ==================================================
+# 9B. DATA COVERAGE (FULL DATASET)
+# ==================================================
+
+st.subheader("Data Coverage")
+st.caption(
+    "Number of records per month versus average demand per record, "
+    "across the full dataset."
+)
+
+coverage = (
+    df.set_index("Date")["Order_Demand"]
+    .resample("MS")
+    .agg(Records="size", Avg_Demand="mean")
+    .reset_index()
+)
+
+# Months with no records have no meaningful average
+coverage.loc[coverage["Records"] == 0, "Avg_Demand"] = None
+
+fig_cov = make_subplots(specs=[[{"secondary_y": True}]])
+
+fig_cov.add_trace(
+    go.Bar(
+        x=coverage["Date"],
+        y=coverage["Records"],
+        name="Records per month",
+        marker_color="rgba(71,118,197,0.55)",
+        hovertemplate="%{x|%b %Y}<br>Records: %{y:,.0f}<extra></extra>"
+    ),
+    secondary_y=False
+)
+
+fig_cov.add_trace(
+    go.Scatter(
+        x=coverage["Date"],
+        y=coverage["Avg_Demand"],
+        name="Avg demand per record",
+        mode="lines",
+        line=dict(color=TEAL, width=3),
+        hovertemplate="%{x|%b %Y}<br>Avg demand: %{y:,.0f}<extra></extra>"
+    ),
+    secondary_y=True
+)
+
+fig_cov.update_layout(
+    title="Records per Month vs Average Demand per Record",
+    legend=dict(orientation="h", y=1.08, x=0.02)
+)
+fig_cov.update_xaxes(title_text="Month")
+fig_cov.update_yaxes(title_text="Records", secondary_y=False)
+fig_cov.update_yaxes(
+    title_text="Avg demand per record",
+    secondary_y=True,
+    showgrid=False
+)
+
+style_chart(fig_cov, 410)
+st.plotly_chart(fig_cov, use_container_width=True, config=PLOT_CONFIG)
+
+jump = findings["jump"]
+if jump is not None:
+    st.caption(
+        f"Monthly records jump from {jump['prev_records']:,} in "
+        f"{jump['prev_month'].strftime('%b %Y')} to {jump['records']:,} in "
+        f"{jump['month'].strftime('%b %Y')}, while average demand per record "
+        "stays broadly steady. This points to a change in data coverage "
+        "rather than real demand growth."
+    )
 
 st.divider()
 
@@ -631,28 +809,65 @@ fig_top.update_layout(
 
 style_chart(fig_top, 430)
 
+# --- Category chart: top 10 categories + "Other" for readability ---
 category_demand = (
     filtered_df.groupby("Product_Category", as_index=False)["Order_Demand"]
     .sum()
     .sort_values("Order_Demand", ascending=False)
 )
 
+TOP_N_CATEGORIES = 10
+top_categories = category_demand.head(TOP_N_CATEGORIES).copy()
+other_categories = category_demand.iloc[TOP_N_CATEGORIES:]
+
+if not other_categories.empty:
+    other_row = pd.DataFrame({
+        "Product_Category": [f"Other ({len(other_categories)} categories)"],
+        "Order_Demand": [other_categories["Order_Demand"].sum()]
+    })
+    category_plot = pd.concat([top_categories, other_row], ignore_index=True)
+else:
+    category_plot = top_categories
+
+category_total = category_plot["Order_Demand"].sum()
+category_plot["Share"] = category_plot["Order_Demand"] / category_total
+category_plot["Label"] = category_plot.apply(
+    lambda r: f"{r['Order_Demand']:,.0f} ({r['Share']:.1%})", axis=1
+)
+
+# Teal for named categories, muted grey for the "Other" bar
+bar_colors = [
+    MUTED if str(name).startswith("Other (") else TEAL
+    for name in category_plot["Product_Category"]
+]
+
 fig_category = px.bar(
-    category_demand,
-    x="Product_Category",
-    y="Order_Demand",
-    title="Demand by Product Category",
-    color="Order_Demand",
-    color_continuous_scale=["#D8F3EF", TEAL]
+    category_plot,
+    x="Order_Demand",
+    y="Product_Category",
+    orientation="h",
+    title="Demand by Product Category (Top 10 + Other)",
+    text="Label"
+)
+
+fig_category.update_traces(
+    marker_color=bar_colors,
+    textposition="outside",
+    cliponaxis=False
 )
 
 fig_category.update_layout(
-    xaxis_title="Product Category",
-    yaxis_title="Total Demand",
-    coloraxis_showscale=False
+    xaxis_title="Total Demand",
+    yaxis_title="Product Category",
+    showlegend=False
 )
 
 style_chart(fig_category, 430)
+
+# Largest category at the top, "Other" at the bottom
+fig_category.update_yaxes(autorange="reversed")
+# Extra right margin so the outside labels are not clipped
+fig_category.update_layout(margin=dict(l=20, r=90, t=65, b=50))
 
 # Both charts have identical heights and aligned column boundaries.
 left, right = st.columns(2, gap="medium")
@@ -847,9 +1062,11 @@ st.subheader("Reading the Results")
 
 st.markdown(
     """
+    - **Key findings:** summarise demand concentration across the full dataset.
     - **Demand trend:** shows how historical recorded demand changes over time.
+    - **Data coverage:** shows how many records exist each month, so jumps caused by data collection are not mistaken for demand growth.
     - **Product performance:** compares total recorded demand across products.
-    - **Category analysis:** identifies categories with higher demand totals.
+    - **Category analysis:** shows the top 10 categories; the rest are grouped as "Other".
     - **Warehouse analysis:** compares demand recorded at each warehouse.
     - **Heatmap:** highlights differences in product demand across warehouses.
     """
