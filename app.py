@@ -535,9 +535,7 @@ f1, f2, f3, f4 = st.columns(4, gap="medium")
 with f1:
     st.metric(
         "Products driving 80% of demand",
-        f"{findings['n80']:,}",
-        delta=f"{findings['pct80']:.1%} of {findings['n_products']:,} products",
-        delta_color="off"
+        f"{findings['n80']:,} ({findings['pct80']:.1%})"
     )
 
 with f2:
