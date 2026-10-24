@@ -5,8 +5,7 @@ An interactive dashboard for exploring product demand across warehouses and prod
 **Live app:** https://demand-analytics-dashboard.streamlit.app
 
 ## Overview
-
-This project analyzes over 1 million order records (January 2011 to January 2017) to show which products and categories drive the most demand. Users can filter by date range and see the results update instantly.
+This project analyzes over 1 million order records covering 2,173 unique products (January 2011 to January 2017) to show which products and categories drive the most demand.
 
 ## Features
 
